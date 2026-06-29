@@ -294,8 +294,8 @@ prediction, probs = predict_match(
     league    = "World Cup",
     history   = history
 )
-# print(f"\n🎯 Custom prediction: Arsenal vs Chelsea")
-# print(f"   Prediction : {prediction}")
-# print(f"   Home Win   : {probs.get('HOME_WIN', 0):.1%}")
-# print(f"   Draw       : {probs.get('DRAW', 0):.1%}")
-# print(f"   Away Win   : {probs.get('AWAY_WIN', 0):.1%}")
+print(f"\n🎯 Custom prediction: Brazil vs Japan")
+print(f"   Prediction : {prediction}")
+print(f"   Home Win   : {probs.get('HOME_WIN', 0):.1%}")
+print(f"   Draw       : {probs.get('DRAW', 0):.1%}")
+print(f"   Away Win   : {probs.get('AWAY_WIN', 0):.1%}")
