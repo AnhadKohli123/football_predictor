@@ -4,9 +4,10 @@ A model for predicting the outcomes of football games
 # repo structure
 
 ├── data/               
-├── football_data_fetcher.py   
+├── data_fetcher.py   
 ├── build_features.py          
-├── train_model.py          
+├── train_model.py   
+├── predict.py
 ├── requirements.txt     
 └── .github/
     └── workflows/
