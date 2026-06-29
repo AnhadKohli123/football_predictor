@@ -3,12 +3,16 @@ A model for predicting the outcomes of football games
 
 # repo structure
 
-├── data/               
-├── data_fetcher.py   
-├── build_features.py          
-├── train_model.py   
+```text
+├── data/
+│   └── results.csv
+├── data_fetcher.py
+├── build_features.py
+├── train_model.py
+├── merge_wc.py
 ├── predict.py
-├── requirements.txt     
+├── requirements.txt
 └── .github/
     └── workflows/
-        └── fetch_data.yml    
+        └── fetch_data.yml
+```
