@@ -1,4 +1,19 @@
-#random forest and xgboost used
+"""
+⚽ Train Model — Step 3 of your prediction model
+=================================================
+INSTRUCTIONS:
+1. Make sure build_features.py has been run
+   (you should have data/features.csv)
+2. Run:  python train_model.py
+3. It saves your trained AI to: models/predictor.pkl
+
+What this script does:
+- Loads your 4,945 matches with features
+- Trains TWO models: Random Forest + XGBoost
+- Picks the best one automatically
+- Tells you the accuracy and what it learned
+- Saves the model so you can use it to predict real matches
+"""
 
 import pandas as pd
 import numpy as np
@@ -41,20 +56,32 @@ FEATURE_COLS = [
     "home_form_points",
     "home_form_goals_scored",
     "home_form_goals_conceded",
+    "home_form_goal_diff",
     "home_form_wins",
     "home_form_draws",
     "home_form_losses",
     "away_form_points",
     "away_form_goals_scored",
     "away_form_goals_conceded",
+    "away_form_goal_diff",
     "away_form_wins",
     "away_form_draws",
     "away_form_losses",
+    "home_venue_win_rate",
+    "home_venue_goals_scored",
+    "home_venue_goals_conceded",
+    "away_travel_win_rate",
+    "away_travel_goals_scored",
+    "away_travel_goals_conceded",
     "h2h_home_wins",
     "h2h_away_wins",
     "h2h_draws",
     "diff_form_points",
-    "diff_goals_scored",
+    "diff_form_goal_diff",
+    "diff_attack",
+    "diff_defence",
+    "league_code",
+    "is_neutral",
 ]
 
 X = df[FEATURE_COLS].copy()
@@ -72,7 +99,9 @@ for label, count in zip(le.classes_, np.bincount(y_encoded)):
     pct = count / len(y_encoded) * 100
     print(f"   {label}: {count} matches ({pct:.1f}%)")
 
+# ============================================================
 # Split into training and test sets
+# ============================================================
 
 # 80% train, 20% test — test set is the most recent matches
 X_train, X_test, y_train, y_test = train_test_split(
@@ -81,8 +110,9 @@ X_train, X_test, y_train, y_test = train_test_split(
 
 print(f"\n🔀 Split: {len(X_train)} training matches, {len(X_test)} test matches")
 
+# ============================================================
 # Train Model 1: Random Forest
-
+# ============================================================
 
 print("\n🌲 Training Random Forest...")
 rf = RandomForestClassifier(
@@ -97,7 +127,9 @@ rf_preds = rf.predict(X_test)
 rf_acc = accuracy_score(y_test, rf_preds)
 print(f"   Accuracy: {rf_acc:.1%}")
 
+# ============================================================
 # Train Model 2: XGBoost
+# ============================================================
 
 print("\n⚡ Training XGBoost...")
 xgb = XGBClassifier(
@@ -115,8 +147,9 @@ xgb_preds = xgb.predict(X_test)
 xgb_acc = accuracy_score(y_test, xgb_preds)
 print(f"   Accuracy: {xgb_acc:.1%}")
 
+# ============================================================
 # Pick the best model
-
+# ============================================================
 
 if xgb_acc >= rf_acc:
     best_model = xgb
@@ -130,6 +163,10 @@ else:
     best_acc   = rf_acc
 
 print(f"\n🏆 Best model: {best_name} ({best_acc:.1%} accuracy)")
+
+# ============================================================
+# Detailed results
+# ============================================================
 
 print("\n📋 Detailed breakdown:\n")
 print(classification_report(
@@ -146,7 +183,9 @@ cm_df = pd.DataFrame(
 )
 print(cm_df.to_string())
 
-
+# ============================================================
+# What features matter most?
+# ============================================================
 
 print("\n🧠 What your AI learned (most important features):")
 if best_name == "XGBoost":
@@ -161,15 +200,18 @@ for feat, imp in feat_importance.items():
     bar = "█" * int(imp * 100)
     print(f"   {feat:<35} {bar} {imp:.3f}")
 
-
+# ============================================================
 # Cross-validation (more reliable accuracy estimate)
+# ============================================================
 
 print(f"\n🔄 Cross-validation (5-fold) for reliability check...")
 cv_scores = cross_val_score(best_model, X, y_encoded, cv=5, scoring="accuracy")
 print(f"   Scores: {[f'{s:.1%}' for s in cv_scores]}")
 print(f"   Average: {cv_scores.mean():.1%} ± {cv_scores.std():.1%}")
 
-
+# ============================================================
+# Baseline comparison
+# ============================================================
 
 # Simplest possible model: always predict HOME_WIN
 home_win_idx = list(le.classes_).index("HOME_WIN")
