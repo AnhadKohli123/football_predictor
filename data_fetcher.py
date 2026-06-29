@@ -1,3 +1,4 @@
+
 """
 ⚽ Football Data Fetcher — Step 1 of your prediction model
 ============================================================
@@ -17,12 +18,12 @@ import pandas as pd
 import time
 import os
 
-
 API_TOKEN = "728561a6c8e2419b9501267b1ac69434"
 HEADERS = {"X-Auth-Token": API_TOKEN}
 BASE_URL = "https://api.football-data.org/v4"
 
-
+# Leagues available on the free tier of football-data.org
+# Note: FIFA World Cup (WC) is also included — code 2000
 LEAGUES = {
     "Premier League":    2021,
     "La Liga":           2014,
@@ -35,7 +36,10 @@ LEAGUES = {
     "World Cup":         2000,   # FIFA World Cup 🌍
 }
 
-SEASONS = [2024, 2023]
+
+# football-data.org uses the STARTING year of a season
+# e.g. 2024 = the 2024/25 season, 2025 = the 2025/26 season
+SEASONS = [2025, 2024, 2023, 2022, 2021, 2020]
 
 
 def fetch_matches(competition_id, season):
