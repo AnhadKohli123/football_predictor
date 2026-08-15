@@ -235,7 +235,11 @@ for league_name, comp_id in LEAGUES.items():
         "dateFrom": today.strftime("%Y-%m-%d"),
         "dateTo":   in_7_days.strftime("%Y-%m-%d"),
     }
-    r = requests.get(url, headers=HEADERS, params=params)
+    try:
+        r = requests.get(url, headers=HEADERS, params=params, timeout=10)
+    except requests.exceptions.RequestException as e:
+        print(f"⚠️  Could not reach API for {league_name}: {e}")
+        continue
     if r.status_code == 200:
         matches = r.json().get("matches", [])
         for m in matches:
