@@ -275,27 +275,5 @@ if upcoming:
 else:
     print("ℹ️  No upcoming matches found in the next 7 days (may be off-season)")
 
-# ============================================================
-# ✏️  PREDICT A CUSTOM MATCH
-# Uncomment and edit the lines below to predict any match you want
-# ============================================================
 
-# prediction, probs = predict_match(
-#     home_team = "Arsenal FC",
-#     away_team = "Chelsea FC",
-#     date      = "2026-01-15",
-#     league    = "Premier League",
-#     history   = history
-# )
-prediction, probs = predict_match(
-    home_team = "Brazil",
-    away_team = "Japan",
-    date      = "2026-07-1",
-    league    = "World Cup",
-    history   = history
-)
-print(f"\n🎯 Custom prediction: Brazil vs Japan")
-print(f"   Prediction : {prediction}")
-print(f"   Home Win   : {probs.get('HOME_WIN', 0):.1%}")
-print(f"   Draw       : {probs.get('DRAW', 0):.1%}")
-print(f"   Away Win   : {probs.get('AWAY_WIN', 0):.1%}")
+
