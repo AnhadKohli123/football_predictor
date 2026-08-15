@@ -226,14 +226,14 @@ print("\n📅 Fetching upcoming fixtures...\n")
 
 upcoming = []
 today = datetime.today()
-in_7_days = today + timedelta(days=7)
+in_10_days = today + timedelta(days=10)
 
 for league_name, comp_id in LEAGUES.items():
     url = f"{BASE_URL}/competitions/{comp_id}/matches"
     params = {
         "status": "SCHEDULED",
         "dateFrom": today.strftime("%Y-%m-%d"),
-        "dateTo":   in_7_days.strftime("%Y-%m-%d"),
+        "dateTo":   in_10_days.strftime("%Y-%m-%d"),
     }
     r = requests.get(url, headers=HEADERS, params=params)
     if r.status_code == 200:
