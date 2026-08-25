@@ -1,151 +1,112 @@
-
 """
-⚽ Football Data Fetcher — Step 1 of your prediction model
-============================================================
-INSTRUCTIONS (no coding knowledge needed):
-1. Replace YOUR_TOKEN_HERE with your football-data.org API token
-2. Open a terminal and run:  python football_data_fetcher.py
-3. It will save match data as CSV files you can open in Excel
+⚽ Step 1 — fetch historical match results.
+===========================================
 
-What this script does:
-- Fetches past match results for multiple leagues
-- Saves them as CSV files (one per league)
-- Prints a preview so you can see what you got
+Downloads finished matches for the supported competitions and seasons into
+data/all_matches.csv, which is what build_features.py reads.
+
+    export FOOTBALL_API_KEY='your_token_here'
+    python data_fetcher.py
+
+    python data_fetcher.py --seasons 2024 2023      # just two seasons
+    python data_fetcher.py --league PL --league CL  # just two competitions
+
+Works with either provider — the token format decides which (see providers.py).
+
+Free tiers are metered, so start small: one league and one season is a good
+first run to confirm the token works before spending the rest of your quota.
+Results are merged into whatever is already in the CSV, so an interrupted run
+can simply be repeated.
 """
 
-import requests
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+from pathlib import Path
+
 import pandas as pd
-import time
-import os
 
-API_TOKEN = "728561a6c8e2419b9501267b1ac69434"
-HEADERS = {"X-Auth-Token": API_TOKEN}
-BASE_URL = "https://api.football-data.org/v4"
+from football_predictor import API_KEY_HELP, Cache, resolve_api_key, resolve_provider
+from providers import LEAGUE_TABLE, current_season, detect_provider, get_provider
 
-# Leagues available on the free tier of football-data.org
-# Note: FIFA World Cup (WC) is also included — code 2000
-LEAGUES = {
-    "Premier League":    2021,
-    "La Liga":           2014,
-    "Bundesliga":        2002,
-    "Serie A":           2019,
-    "Ligue 1":           2015,
-    "Eredivisie":        2003,
-    "Primeira Liga":     2017,
-    "Champions League":  2001,
-    "World Cup":         2000,   # FIFA World Cup 🌍
-}
+log = logging.getLogger("data_fetcher")
+
+OUTPUT_FILE = "data/all_matches.csv"
+
+# Seasons are identified by their STARTING year: 2024 means 2024/25.
+DEFAULT_SEASONS = [current_season(), current_season() - 1, current_season() - 2,
+                   current_season() - 3, current_season() - 4]
+
+CSV_COLUMNS = ["league", "date", "matchday", "home_team", "away_team",
+               "home_goals", "away_goals", "result", "season", "stage"]
 
 
-# football-data.org uses the STARTING year of a season
-# e.g. 2024 = the 2024/25 season, 2025 = the 2025/26 season
-SEASONS = [2025, 2024, 2023, 2022, 2021, 2020]
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="Fetch historical match results.")
+    parser.add_argument("--league", action="append", dest="leagues", choices=list(LEAGUE_TABLE),
+                        help="restrict to a competition; repeat for several (default: all)")
+    parser.add_argument("--seasons", type=int, nargs="+", default=DEFAULT_SEASONS,
+                        help=f"season start years (default: {' '.join(map(str, DEFAULT_SEASONS))})")
+    parser.add_argument("--output", default=OUTPUT_FILE, help=f"output CSV (default: {OUTPUT_FILE})")
+    parser.add_argument("--api-key", default=None, help="token (else FOOTBALL_API_KEY or .env)")
+    parser.add_argument("--provider", choices=["api-football", "football-data"], default=None,
+                        help="override provider auto-detection")
+    parser.add_argument("--db", default="football_cache.db", help="cache database")
+    parser.add_argument("--force", action="store_true", help="ignore cached responses")
+    parser.add_argument("-v", "--verbose", action="store_true")
+    args = parser.parse_args(argv)
 
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
+                        format="%(message)s")
 
-def fetch_matches(competition_id, season):
-    """Fetch all finished matches for a competition and season."""
-    url = f"{BASE_URL}/competitions/{competition_id}/matches"
-    params = {"season": season, "status": "FINISHED"}
+    api_key = resolve_api_key(args.api_key)
+    if not api_key:
+        print(f"\n🔑 {API_KEY_HELP}\n", file=sys.stderr)
+        return 2
 
-    response = requests.get(url, headers=HEADERS, params=params)
+    provider_name = resolve_provider(args.provider) or detect_provider(api_key)
+    keys = args.leagues or list(LEAGUE_TABLE)
 
-    if response.status_code == 200:
-        return response.json().get("matches", [])
-    elif response.status_code == 403:
-        print(f"  ⚠️  Access denied for competition {competition_id} season {season}")
-        print("     (Some leagues need a paid tier — skipping)")
-        return []
-    elif response.status_code == 429:
-        print("  ⏳ Rate limit hit — waiting 60 seconds...")
-        time.sleep(60)
-        return fetch_matches(competition_id, season)  # retry
-    else:
-        print(f"  ❌ Error {response.status_code}: {response.text[:100]}")
-        return []
+    print(f"\n⚽ Fetching historical results via {provider_name}...\n")
 
+    cache = Cache(args.db)
+    try:
+        client = get_provider(api_key, cache, force=args.force, provider=provider_name)
+        rows = client.fetch_results(leagues=keys, seasons=list(args.seasons))
+    finally:
+        cache.close()
 
-def parse_matches(matches, league_name):
-    """Turn raw API response into a clean table."""
-    rows = []
-    for m in matches:
-        home = m["homeTeam"]["name"]
-        away = m["awayTeam"]["name"]
-        score = m.get("score", {})
-        full  = score.get("fullTime", {})
-        home_goals = full.get("home")
-        away_goals = full.get("away")
+    if not rows:
+        print("\n❌ No data fetched. Check the token, then try the smallest possible run:")
+        print("   python data_fetcher.py --league PL --seasons 2024 -v")
+        return 1
 
-        # Result from HOME team's perspective
-        if home_goals is None or away_goals is None:
-            result = None
-        elif home_goals > away_goals:
-            result = "HOME_WIN"
-        elif home_goals < away_goals:
-            result = "AWAY_WIN"
-        else:
-            result = "DRAW"
+    fresh = pd.DataFrame(rows)
+    fresh = fresh.reindex(columns=CSV_COLUMNS)
+    fresh = fresh.dropna(subset=["result"])
 
-        rows.append({
-            "league":       league_name,
-            "date":         m.get("utcDate", "")[:10],  # just YYYY-MM-DD
-            "matchday":     m.get("matchday"),
-            "home_team":    home,
-            "away_team":    away,
-            "home_goals":   home_goals,
-            "away_goals":   away_goals,
-            "result":       result,   # ← this is what your model will predict
-            "season":       m.get("season", {}).get("startDate", "")[:4],
-            "stage":        m.get("stage", ""),
-        })
-    return rows
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if output.exists():
+        existing = pd.read_csv(output)
+        print(f"\n🔀 Merging with {len(existing)} existing rows")
+        fresh = pd.concat([existing.reindex(columns=CSV_COLUMNS), fresh], ignore_index=True)
 
+    fresh = fresh.drop_duplicates(subset=["date", "home_team", "away_team"], keep="last")
+    fresh = fresh.sort_values(["date", "league"]).reset_index(drop=True)
+    fresh.to_csv(output, index=False)
 
-def main():
-    os.makedirs("data", exist_ok=True)
-    all_rows = []
-
-    print("\n⚽ Fetching football match data...\n")
-
-    for league_name, competition_id in LEAGUES.items():
-        for season in SEASONS:
-            print(f"📥 {league_name} — season {season}...")
-            matches = fetch_matches(competition_id, season)
-
-            if matches:
-                rows = parse_matches(matches, league_name)
-                all_rows.extend(rows)
-                print(f"   ✅ Got {len(rows)} matches")
-            else:
-                print(f"   ℹ️  No matches found")
-
-            # football-data.org free tier = 10 requests/min
-            # Wait 7 seconds between requests to stay safe
-            time.sleep(7)
-
-    if not all_rows:
-        print("\n❌ No data fetched. Check your API token!")
-        return
-
-    # Save everything to one big CSV
-    df = pd.DataFrame(all_rows)
-    df = df.dropna(subset=["result"])  # remove matches with no result yet
-    df = df.sort_values(["league", "date"])
-
-    output_file = "data/all_matches.csv"
-    df.to_csv(output_file, index=False)
-
-    print(f"\n✅ Done! Saved {len(df)} matches to '{output_file}'")
-    print("\n📊 Preview of your data:\n")
-    print(df.head(10).to_string(index=False))
-
-    print("\n📈 Match counts by league:")
-    print(df.groupby("league")["result"].count().to_string())
-
-    print("\n🎯 Result distribution (across all leagues):")
-    print(df["result"].value_counts().to_string())
-
-    print("\n🚀 Next step: run  python build_features.py  to prepare this for ML!")
+    print(f"\n✅ Saved {len(fresh)} matches to '{output}'")
+    print(f"🌐 {client.requests_made} API request(s) made")
+    print("\n📈 By competition:")
+    print(fresh.groupby("league")["result"].count().sort_values(ascending=False).to_string())
+    print("\n🎯 Result distribution:")
+    print(fresh["result"].value_counts().to_string())
+    print("\n🚀 Next:  python build_features.py")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

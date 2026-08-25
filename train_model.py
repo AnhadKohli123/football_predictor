@@ -1,231 +1,215 @@
 """
-⚽ Train Model — Step 3 of your prediction model
-=================================================
-INSTRUCTIONS:
-1. Make sure build_features.py has been run
-   (you should have data/features.csv)
-2. Run:  python train_model.py
-3. It saves your trained AI to: models/predictor.pkl
+⚽ Step 3 — train the model.
+============================
 
-What this script does:
-- Loads your 4,945 matches with features
-- Trains TWO models: Random Forest + XGBoost
-- Picks the best one automatically
-- Tells you the accuracy and what it learned
-- Saves the model so you can use it to predict real matches
+Reads data/features.csv, trains a Random Forest and an XGBoost model, keeps
+whichever generalises better, and saves it to models/.
+
+    python train_model.py
+    python train_model.py --test-size 0.15 --seed 7
+
+A note on how this is evaluated
+-------------------------------
+Matches are evaluated with a CHRONOLOGICAL split: the model trains on older
+matches and is tested on the most recent ones. A random shuffled split would
+let the model train on 2025 matches and be tested on 2019 ones — it would
+already "know" how those teams developed, and the reported accuracy would be
+optimistic in a way that never survives contact with real fixtures.
+
+Accuracy alone is also a poor score for this problem, because predicting
+"home win" every time is a surprisingly strong baseline. Log loss and the
+Brier score are reported too: those judge the probabilities, which is what
+you actually read off the output.
 """
 
-import pandas as pd
-import numpy as np
-import os
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
 import joblib
+import numpy as np
+import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.metrics import (accuracy_score, classification_report,
-                             confusion_matrix)
+from sklearn.metrics import (accuracy_score, brier_score_loss, classification_report,
+                             confusion_matrix, log_loss)
 from sklearn.preprocessing import LabelEncoder
-from xgboost import XGBClassifier
 
-# ============================================================
-# Load features
-# ============================================================
+from features import FEATURE_COLS
 
-INPUT_FILE  = "data/features.csv"
-MODEL_DIR   = "models"
-MODEL_FILE  = f"{MODEL_DIR}/predictor.pkl"
-ENCODER_FILE = f"{MODEL_DIR}/label_encoder.pkl"
+INPUT_FILE = "data/features.csv"
+MODEL_DIR = "models"
 
-print("\n⚽ Training your soccer prediction AI...\n")
 
-if not os.path.exists(INPUT_FILE):
-    print("❌ Could not find data/features.csv")
-    print("   Please run build_features.py first!")
-    exit()
+def multiclass_brier(y_true_onehot: np.ndarray, probs: np.ndarray) -> float:
+    """Mean squared error across the predicted probability vector."""
+    return float(np.mean(np.sum((probs - y_true_onehot) ** 2, axis=1)))
 
-os.makedirs(MODEL_DIR, exist_ok=True)
 
-df = pd.read_csv(INPUT_FILE)
-print(f"✅ Loaded {len(df)} matches with {len(df.columns)} columns")
+def evaluate(name: str, model, X_test, y_test, classes) -> dict:
+    probs = model.predict_proba(X_test)
+    preds = probs.argmax(axis=1)
+    onehot = np.eye(len(classes))[y_test]
+    return {
+        "name": name,
+        "model": model,
+        "preds": preds,
+        "probs": probs,
+        "accuracy": accuracy_score(y_test, preds),
+        "log_loss": log_loss(y_test, probs, labels=list(range(len(classes)))),
+        "brier": multiclass_brier(onehot, probs),
+    }
 
-# ============================================================
-# Prepare features (X) and target (y)
-# ============================================================
 
-# These are the columns the model will learn from
-FEATURE_COLS = [
-    "home_form_points",
-    "home_form_goals_scored",
-    "home_form_goals_conceded",
-    "home_form_goal_diff",
-    "home_form_wins",
-    "home_form_draws",
-    "home_form_losses",
-    "away_form_points",
-    "away_form_goals_scored",
-    "away_form_goals_conceded",
-    "away_form_goal_diff",
-    "away_form_wins",
-    "away_form_draws",
-    "away_form_losses",
-    "home_venue_win_rate",
-    "home_venue_goals_scored",
-    "home_venue_goals_conceded",
-    "away_travel_win_rate",
-    "away_travel_goals_scored",
-    "away_travel_goals_conceded",
-    "h2h_home_wins",
-    "h2h_away_wins",
-    "h2h_draws",
-    "diff_form_points",
-    "diff_form_goal_diff",
-    "diff_attack",
-    "diff_defence",
-    "league_code",
-    "is_neutral",
-]
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="Train the match outcome model.")
+    parser.add_argument("--input", default=INPUT_FILE)
+    parser.add_argument("--model-dir", default=MODEL_DIR)
+    parser.add_argument("--test-size", type=float, default=0.2,
+                        help="fraction of the most recent matches held out (default: 0.2)")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--select-by", choices=["log_loss", "accuracy", "brier"],
+                        default="log_loss",
+                        help="metric used to pick the better model (default: log_loss)")
+    args = parser.parse_args(argv)
 
-X = df[FEATURE_COLS].copy()
-y = df["result"].copy()
+    print("\n⚽ Training the match predictor...\n")
 
-# Fill missing h2h values with 0.33 (neutral — no history)
-X = X.fillna(0.33)
+    if not Path(args.input).exists():
+        print(f"❌ Could not find {args.input}")
+        print("   Run:  python build_features.py")
+        return 1
 
-# Encode result: HOME_WIN, DRAW, AWAY_WIN → 0, 1, 2
-le = LabelEncoder()
-y_encoded = le.fit_transform(y)
+    df = pd.read_csv(args.input, parse_dates=["date"])
+    df = df.dropna(subset=["result"]).sort_values("date").reset_index(drop=True)
+    print(f"✅ Loaded {len(df)} matches")
+    print(f"   {df['date'].min().date()} → {df['date'].max().date()}")
 
-print(f"\n📊 Result distribution:")
-for label, count in zip(le.classes_, np.bincount(y_encoded)):
-    pct = count / len(y_encoded) * 100
-    print(f"   {label}: {count} matches ({pct:.1f}%)")
+    missing = [c for c in FEATURE_COLS if c not in df.columns]
+    if missing:
+        print(f"\n❌ features.csv is missing columns: {missing}")
+        print("   Re-run build_features.py — features.py has probably changed.")
+        return 1
 
-# ============================================================
-# Split into training and test sets
-# ============================================================
+    X = df[FEATURE_COLS].astype(float).fillna(0.33)
+    encoder = LabelEncoder()
+    y = encoder.fit_transform(df["result"])
+    classes = list(encoder.classes_)
 
-# 80% train, 20% test — test set is the most recent matches
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y_encoded, test_size=0.2, random_state=42, shuffle=True
-)
+    print("\n📊 Result distribution:")
+    for label, count in zip(classes, np.bincount(y)):
+        print(f"   {label:<9} {count:>6}  ({count / len(y):.1%})")
 
-print(f"\n🔀 Split: {len(X_train)} training matches, {len(X_test)} test matches")
+    # ── Chronological split: train on the past, test on the future ──
+    split_at = int(len(df) * (1 - args.test_size))
+    X_train, X_test = X.iloc[:split_at], X.iloc[split_at:]
+    y_train, y_test = y[:split_at], y[split_at:]
 
-# ============================================================
-# Train Model 1: Random Forest
-# ============================================================
+    print(f"\n🔀 Chronological split at {df['date'].iloc[split_at].date()}")
+    print(f"   Train: {len(X_train)} matches (up to {df['date'].iloc[split_at - 1].date()})")
+    print(f"   Test:  {len(X_test)} matches (from {df['date'].iloc[split_at].date()})")
 
-print("\n🌲 Training Random Forest...")
-rf = RandomForestClassifier(
-    n_estimators=200,
-    max_depth=8,
-    min_samples_leaf=10,
-    random_state=42,
-    n_jobs=-1
-)
-rf.fit(X_train, y_train)
-rf_preds = rf.predict(X_test)
-rf_acc = accuracy_score(y_test, rf_preds)
-print(f"   Accuracy: {rf_acc:.1%}")
+    results = []
 
-# ============================================================
-# Train Model 2: XGBoost
-# ============================================================
+    print("\n🌲 Training Random Forest...")
+    rf = RandomForestClassifier(
+        n_estimators=400, max_depth=10, min_samples_leaf=15,
+        class_weight="balanced_subsample", random_state=args.seed, n_jobs=-1,
+    )
+    rf.fit(X_train, y_train)
+    results.append(evaluate("Random Forest", rf, X_test, y_test, classes))
+    print(f"   accuracy {results[-1]['accuracy']:.1%}   log loss {results[-1]['log_loss']:.4f}")
 
-print("\n⚡ Training XGBoost...")
-xgb = XGBClassifier(
-    n_estimators=200,
-    max_depth=5,
-    learning_rate=0.05,
-    subsample=0.8,
-    colsample_bytree=0.8,
-    random_state=42,
-    eval_metric="mlogloss",
-    verbosity=0
-)
-xgb.fit(X_train, y_train)
-xgb_preds = xgb.predict(X_test)
-xgb_acc = accuracy_score(y_test, xgb_preds)
-print(f"   Accuracy: {xgb_acc:.1%}")
+    try:
+        from xgboost import XGBClassifier
+    except ImportError:
+        print("\n⚠️  xgboost not installed — skipping (pip install xgboost)")
+    else:
+        print("\n⚡ Training XGBoost...")
+        xgb = XGBClassifier(
+            n_estimators=400, max_depth=4, learning_rate=0.05,
+            subsample=0.8, colsample_bytree=0.8, min_child_weight=5,
+            reg_lambda=1.5, objective="multi:softprob", num_class=len(classes),
+            random_state=args.seed, eval_metric="mlogloss", verbosity=0,
+        )
+        xgb.fit(X_train, y_train)
+        results.append(evaluate("XGBoost", xgb, X_test, y_test, classes))
+        print(f"   accuracy {results[-1]['accuracy']:.1%}   log loss {results[-1]['log_loss']:.4f}")
 
-# ============================================================
-# Pick the best model
-# ============================================================
+    # Lower is better for log loss and Brier; higher is better for accuracy.
+    if args.select_by == "accuracy":
+        best = max(results, key=lambda r: r["accuracy"])
+    else:
+        best = min(results, key=lambda r: r[args.select_by])
 
-if xgb_acc >= rf_acc:
-    best_model = xgb
-    best_preds = xgb_preds
-    best_name  = "XGBoost"
-    best_acc   = xgb_acc
-else:
-    best_model = rf
-    best_preds = rf_preds
-    best_name  = "Random Forest"
-    best_acc   = rf_acc
+    print(f"\n🏆 Best by {args.select_by}: {best['name']}")
+    print(f"   Accuracy  {best['accuracy']:.1%}")
+    print(f"   Log loss  {best['log_loss']:.4f}   (lower is better)")
+    print(f"   Brier     {best['brier']:.4f}   (lower is better)")
 
-print(f"\n🏆 Best model: {best_name} ({best_acc:.1%} accuracy)")
+    # ── Baselines worth beating ──
+    home_idx = classes.index("HOME_WIN") if "HOME_WIN" in classes else 0
+    always_home = float((y_test == home_idx).mean())
+    train_prior = np.bincount(y_train, minlength=len(classes)) / len(y_train)
+    prior_probs = np.tile(train_prior, (len(y_test), 1))
+    prior_ll = log_loss(y_test, prior_probs, labels=list(range(len(classes))))
 
-# ============================================================
-# Detailed results
-# ============================================================
+    print("\n📏 Baselines:")
+    print(f"   Always predict HOME_WIN     accuracy {always_home:.1%}")
+    print(f"   Training-set class priors   log loss {prior_ll:.4f}")
+    delta_acc = best["accuracy"] - always_home
+    delta_ll = prior_ll - best["log_loss"]
+    print(f"\n   Model vs. always-home:  {delta_acc:+.1%} accuracy")
+    print(f"   Model vs. class priors: {delta_ll:+.4f} log loss "
+          f"({'better' if delta_ll > 0 else 'WORSE — the model adds nothing'})")
 
-print("\n📋 Detailed breakdown:\n")
-print(classification_report(
-    y_test, best_preds,
-    target_names=le.classes_
-))
+    print("\n📋 Test-set breakdown:\n")
+    print(classification_report(y_test, best["preds"], target_names=classes,
+                                zero_division=0))
 
-print("🔲 Confusion Matrix (rows=actual, cols=predicted):")
-cm = confusion_matrix(y_test, best_preds)
-cm_df = pd.DataFrame(
-    cm,
-    index=[f"Actual {c}" for c in le.classes_],
-    columns=[f"Pred {c}" for c in le.classes_]
-)
-print(cm_df.to_string())
+    print("🔲 Confusion matrix (rows = actual, cols = predicted):")
+    cm = pd.DataFrame(
+        confusion_matrix(y_test, best["preds"], labels=list(range(len(classes)))),
+        index=[f"actual {c}" for c in classes],
+        columns=[f"pred {c}" for c in classes],
+    )
+    print(cm.to_string())
 
-# ============================================================
-# What features matter most?
-# ============================================================
+    print("\n🧠 Most important features:")
+    importances = pd.Series(best["model"].feature_importances_, index=FEATURE_COLS)
+    for feature, value in importances.sort_values(ascending=False).head(15).items():
+        bar = "█" * max(1, int(value * 120))
+        print(f"   {feature:<28} {bar} {value:.3f}")
 
-print("\n🧠 What your AI learned (most important features):")
-if best_name == "XGBoost":
-    importances = best_model.feature_importances_
-else:
-    importances = best_model.feature_importances_
+    model_dir = Path(args.model_dir)
+    model_dir.mkdir(parents=True, exist_ok=True)
+    joblib.dump(best["model"], model_dir / "predictor.pkl")
+    joblib.dump(encoder, model_dir / "label_encoder.pkl")
 
-feat_importance = pd.Series(importances, index=FEATURE_COLS)
-feat_importance = feat_importance.sort_values(ascending=False)
+    (model_dir / "metrics.json").write_text(
+        pd.Series(
+            {
+                "model": best["name"],
+                "trained_on": len(X_train),
+                "tested_on": len(X_test),
+                "accuracy": round(best["accuracy"], 4),
+                "log_loss": round(best["log_loss"], 4),
+                "brier": round(best["brier"], 4),
+                "baseline_always_home": round(always_home, 4),
+                "baseline_prior_log_loss": round(prior_ll, 4),
+                "n_features": len(FEATURE_COLS),
+            }
+        ).to_json(indent=2)
+    )
 
-for feat, imp in feat_importance.items():
-    bar = "█" * int(imp * 100)
-    print(f"   {feat:<35} {bar} {imp:.3f}")
+    print(f"\n💾 Saved:")
+    print(f"   {model_dir / 'predictor.pkl'}")
+    print(f"   {model_dir / 'label_encoder.pkl'}")
+    print(f"   {model_dir / 'metrics.json'}")
+    print("\n🚀 Next:  python predict.py")
+    return 0
 
-# ============================================================
-# Cross-validation (more reliable accuracy estimate)
-# ============================================================
 
-print(f"\n🔄 Cross-validation (5-fold) for reliability check...")
-cv_scores = cross_val_score(best_model, X, y_encoded, cv=5, scoring="accuracy")
-print(f"   Scores: {[f'{s:.1%}' for s in cv_scores]}")
-print(f"   Average: {cv_scores.mean():.1%} ± {cv_scores.std():.1%}")
-
-# ============================================================
-# Baseline comparison
-# ============================================================
-
-# Simplest possible model: always predict HOME_WIN
-home_win_idx = list(le.classes_).index("HOME_WIN")
-baseline_acc = (y_test == home_win_idx).mean()
-print(f"\n📏 Baseline (always predict Home Win): {baseline_acc:.1%}")
-print(f"   Your AI beats baseline by: +{(best_acc - baseline_acc):.1%}")
-
-# ============================================================
-# Save the model
-# ============================================================
-
-joblib.dump(best_model, MODEL_FILE)
-joblib.dump(le, ENCODER_FILE)
-
-print(f"\n💾 Model saved to: {MODEL_FILE}")
-print(f"   Encoder saved to: {ENCODER_FILE}")
-print(f"\n🚀 Next step: run  python predict.py  to predict real upcoming matches!")
+if __name__ == "__main__":
+    sys.exit(main())

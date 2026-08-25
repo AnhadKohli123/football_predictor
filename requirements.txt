@@ -1,19 +1,16 @@
-
-# Install all of these by running:  pip install -r requirements.txt
+# Install everything with:  pip install -r requirements.txt
 
 # --- Data fetching ---
-requests==2.32.3          # calls the football-data.org API
+requests>=2.32,<3          # talks to the football API
 
 # --- Data handling ---
-pandas==2.2.2             # loads, cleans, and saves CSV files
-numpy==1.26.4             # math and number crunching
+pandas>=2.2,<3             # loads, cleans and saves CSV files
+numpy>=1.26,<3             # the maths underneath everything
 
 # --- Machine learning ---
-scikit-learn==1.5.0       # train the prediction model (Random Forest, etc.)
-xgboost==2.0.3            # more powerful model — better accuracy
+scikit-learn>=1.5,<2       # Random Forest, metrics, label encoding
+xgboost>=2.0,<4            # gradient boosting — usually the stronger model
+joblib>=1.4,<2             # saves and loads the trained model
 
-# --- Saving your trained model ---
-joblib==1.4.2             # save/load the model so you don't retrain every time
-
-# ---Simple web app to show predictions ---
-streamlit==1.35.0         # turn your model into a browser app, zero web skills needed
+# Caching uses sqlite3 and the CLI uses argparse — both are in the standard
+# library, so there is nothing extra to install for those.
