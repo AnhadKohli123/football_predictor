@@ -12,5 +12,8 @@ scikit-learn>=1.5,<2       # Random Forest, metrics, label encoding
 xgboost>=2.0,<4            # gradient boosting — usually the stronger model
 joblib>=1.4,<2             # saves and loads the trained model
 
+# --- Web frontend (python app.py) ---
+flask>=3.0,<4             # the local dashboard at 127.0.0.1:5000
+
 # Caching uses sqlite3 and the CLI uses argparse — both are in the standard
 # library, so there is nothing extra to install for those.
