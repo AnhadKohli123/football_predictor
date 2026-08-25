@@ -34,30 +34,57 @@ DATE        HOME       AWAY       PREDICTION  HOME%  DRAW%  AWAY%  CONF
 ```bash
 git clone https://github.com/AnhadKohli123/football_predictor.git
 cd football_predictor
-pip install -r requirements.txt
+./setup.sh
 ```
 
-Build a model — this needs **no API token at all**:
+That is the whole install. `setup.sh` creates a virtualenv, installs
+dependencies, downloads 44,000 club matches, builds features and trains the
+model — about a minute, and **no API token is needed for any of it**. Re-run
+it any time; it skips work that is already done unless you pass `--force`.
+
+Then:
 
 ```bash
-python fetch_club_data.py --all-leagues --seasons 14   # 44k club matches
+source .venv/bin/activate
+python app.py            # http://127.0.0.1:5000
+```
+
+<details>
+<summary>Manual install, or Windows</summary>
+
+```bash
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+
+python fetch_club_data.py --all-leagues --seasons 14
 python build_features.py
 python train_model.py
+python app.py
 ```
 
-Then predict, either in the browser or the terminal:
+A virtualenv is not optional on Debian, Ubuntu or Homebrew Python: those mark
+the system interpreter as externally managed (PEP 668) and a plain
+`pip install` fails with `externally-managed-environment`. If `python -m venv`
+itself fails on Debian or Ubuntu, run `sudo apt install python3-venv` first.
+
+</details>
+
+### Upcoming fixtures need a token
+
+Predictions work offline. Only the fixtures tab and `predict.py --days N`
+call an API. `.env` is gitignored and is never in the repo, so create it on
+each machine:
 
 ```bash
-python app.py            # http://127.0.0.1:5000
-python predict.py --match "Arsenal" "Chelsea"
+echo 'FOOTBALL_API_KEY=your_token_here' > .env
 ```
 
-A token is only needed for *upcoming* fixtures. Put it in a `.env` file
-(gitignored):
-
-```
-FOOTBALL_API_KEY=your_token_here
-```
+Free tokens: [API-Football](https://dashboard.api-football.com/register)
+(40-character key) or
+[football-data.org](https://www.football-data.org/client/register)
+(32-character key). The provider is detected from the key's format; override
+with `--provider` if the guess is wrong. Restart `app.py` after editing `.env`.
 
 **[QUICKSTART.md](QUICKSTART.md)** walks through it step by step;
 **[SETUP.md](SETUP.md)** explains the architecture.
