@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Football Predictor</title>
+<meta name="description" content="Predict football match outcomes from historical form.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚽</text></svg>">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="brand">
+      <div class="ball">⚽</div>
+      <div>
+        <h1>Football Predictor</h1>
+        <div class="tagline">Club match outcomes from form, head-to-head and venue records across Europe’s top leagues.</div>
+      </div>
+    </div>
+    <div class="pills" id="pills">
+      <span class="pill"><span class="dot"></span> Loading…</span>
+    </div>
+  </header>
+
+  <div class="tabs" role="tablist">
+    <button class="tab" role="tab" aria-selected="true"  data-panel="predictor">Match Predictor</button>
+    <button class="tab" role="tab" aria-selected="false" data-panel="fixtures">Upcoming Fixtures</button>
+    <button class="tab" role="tab" aria-selected="false" data-panel="model">Model</button>
+  </div>
+
+  <!-- ============ Match predictor ============ -->
+  <section class="panel active" id="panel-predictor">
+    <div class="card has-dropdown">
+      <div class="card-title">Pick a fixture</div>
+
+      <div class="picker-row">
+        <div class="field combo" data-combo>
+          <label for="home-team">Home team</label>
+          <input type="text" id="home-team" autocomplete="off" placeholder="Start typing…">
+          <div class="options" data-options></div>
+        </div>
+        <div class="vs">VS</div>
+        <div class="field combo" data-combo>
+          <label for="away-team">Away team</label>
+          <input type="text" id="away-team" autocomplete="off" placeholder="Start typing…">
+          <div class="options" data-options></div>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="field">
+          <label for="league">Competition</label>
+          <select id="league"></select>
+        </div>
+        <div class="field">
+          <label for="match-date">Match date</label>
+          <input type="date" id="match-date">
+        </div>
+      </div>
+
+      <button class="go" id="predict-btn">Predict outcome</button>
+    </div>
+
+    <div id="predict-result" class="result"></div>
+  </section>
+
+  <!-- ============ Fixtures ============ -->
+  <section class="panel" id="panel-fixtures">
+    <div class="card">
+      <div class="card-title">Fetch upcoming fixtures</div>
+
+      <div class="field" style="margin-bottom:18px">
+        <label for="days">How far ahead</label>
+        <div class="range-row">
+          <input type="range" id="days" min="1" max="60" value="14">
+          <span class="range-val" id="days-val">14 days</span>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Competitions <span style="text-transform:none;letter-spacing:0">— none selected means all</span></label>
+        <div class="chips" id="league-chips"></div>
+      </div>
+
+      <button class="go" id="fixtures-btn">Fetch &amp; predict</button>
+    </div>
+
+    <div id="fixtures-result"></div>
+  </section>
+
+  <!-- ============ Model ============ -->
+  <section class="panel" id="panel-model">
+    <div class="card">
+      <div class="card-title">Model performance</div>
+      <div id="model-metrics"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">How to read these numbers</div>
+
+      <div class="note">
+        <b>The test set is chronological, not random.</b> The model trains on older
+        matches and is scored on more recent ones. A random split would let it train
+        on 2025 matches and be tested on 2019 ones — it would already know how those
+        teams turned out, and the accuracy would look far better than anything you
+        would ever see on a real fixture.
+      </div>
+
+      <div class="note">
+        <b>Log loss judges the probabilities, not just the winner.</b> Accuracy alone
+        flatters this problem, because always predicting a home win is a surprisingly
+        strong baseline. If the model does not beat the class-prior log loss, it has
+        learned nothing useful.
+      </div>
+
+      <div class="note warn">
+        <b>Draws are rarely the top prediction.</b> Home and away wins are called
+        reasonably well; draws almost never rank first, because they seldom carry the
+        strongest signal. Read the draw percentage rather than the headline call when
+        that is what you care about.
+      </div>
+
+      <div class="note warn">
+        <b>Club football is harder than international football.</b> League opponents are
+        far more evenly matched than a World Cup group stage, where genuine mismatches
+        are common — so expect roughly 48–53% here, against a 43% always-home baseline.
+        Treat every output as odds, not as an answer.
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>Predictions are probabilistic. Not betting advice.</span>
+    <span>CLI equivalent: <code>python predict.py --days 7</code></span>
+  </footer>
+
+</div>
+
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>

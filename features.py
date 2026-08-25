@@ -15,6 +15,8 @@ keeps the training set free of leakage.
 from __future__ import annotations
 
 import bisect
+import re
+import unicodedata
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
@@ -107,6 +109,111 @@ NEUTRAL_H2H = {
 }
 
 
+# ============================================================
+# Team name matching
+# ============================================================
+
+# Every data source spells clubs differently: openfootball says "Arsenal FC",
+# API-Football says "Arsenal", football-data.org says "Arsenal FC", and a
+# human types "arsenal". Without normalisation, a fixture would look like a
+# brand-new team and fall back to priors — silently making every prediction
+# useless. Names are therefore matched on a normalised key, while the original
+# spelling is kept for display.
+
+#: Club-type words that carry no identifying information.
+CLUB_TOKENS = {
+    "fc", "afc", "cf", "ac", "as", "sc", "ss", "ssc", "sv", "tsv", "tsg",
+    "vfl", "vfb", "bsc", "fsv", "spvgg", "rc", "rcd", "cd", "ud", "sd", "cp",
+    "aс", "us", "usc", "asd", "calcio", "club", "de", "futbol", "football",
+    "borussia", "deportivo", "real" if False else "", "the",
+}
+CLUB_TOKENS.discard("")
+
+#: Names that normalisation alone will not reconcile.
+TEAM_ALIASES = {
+    "man city": "manchester city",
+    "man utd": "manchester united",
+    "man united": "manchester united",
+    "spurs": "tottenham hotspur",
+    "tottenham": "tottenham hotspur",
+    "wolves": "wolverhampton wanderers",
+    "brighton": "brighton hove albion",
+    "brighton and hove albion": "brighton hove albion",
+    "west brom": "west bromwich albion",
+    "newcastle": "newcastle united",
+    "leeds": "leeds united",
+    "west ham": "west ham united",
+    "nottingham forest": "nottingham forest",
+    "notts forest": "nottingham forest",
+    "sheffield utd": "sheffield united",
+    "inter": "internazionale",
+    "inter milan": "internazionale",
+    "ac milan": "milan",
+    "atletico madrid": "atletico de madrid",
+    "atl madrid": "atletico de madrid",
+    "athletic bilbao": "athletic club",
+    "barcelona": "barcelona",
+    "fc barcelona": "barcelona",
+    "bayern": "bayern munchen",
+    "bayern munich": "bayern munchen",
+    "psg": "paris saint germain",
+    "paris sg": "paris saint germain",
+    "dortmund": "borussia dortmund",
+    "monchengladbach": "borussia monchengladbach",
+    "leverkusen": "bayer 04 leverkusen",
+    "bayer leverkusen": "bayer 04 leverkusen",
+    "hoffenheim": "1899 hoffenheim",
+    "koln": "1 fc koln",
+    "cologne": "1 fc koln",
+    "psv": "psv eindhoven",
+    "sporting": "sporting cp",
+    "sporting lisbon": "sporting cp",
+    "porto": "fc porto",
+    "benfica": "sl benfica",
+    "roma": "as roma",
+    "napoli": "ssc napoli",
+    "juventus": "juventus",
+    "lazio": "ss lazio",
+    "marseille": "olympique marseille",
+    "lyon": "olympique lyonnais",
+}
+
+_NON_ALNUM = re.compile(r"[^a-z0-9 ]+")
+_SPACES = re.compile(r"\s+")
+
+
+def team_key(name: str) -> str:
+    """
+    A normalised key for matching a team across data sources.
+
+    "Arsenal FC", "arsenal", and "Arsenal F.C." all collapse to "arsenal".
+    Returns an empty string for empty input.
+    """
+    if not name:
+        return ""
+
+    # Strip accents: "Köln" -> "Koln", "Atlético" -> "Atletico".
+    text = unicodedata.normalize("NFKD", str(name))
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    text = text.lower().replace("&", " and ")
+    text = _NON_ALNUM.sub(" ", text)
+    text = _SPACES.sub(" ", text).strip()
+
+    if text in TEAM_ALIASES:
+        text = TEAM_ALIASES[text]
+
+    # Drop club-type words, but never every word — "AC Milan" must not become
+    # empty, and a name made only of such tokens keeps its original form.
+    words = [w for w in text.split() if w not in CLUB_TOKENS]
+    if words:
+        text = " ".join(words)
+
+    if text in TEAM_ALIASES:
+        text = TEAM_ALIASES[text]
+
+    return text
+
+
 def result_from_goals(home_goals, away_goals) -> Optional[str]:
     """Result from the HOME team's perspective."""
     if pd.isna(home_goals) or pd.isna(away_goals):
@@ -154,6 +261,10 @@ class MatchHistory:
         frame = frame.dropna(subset=["date", "home_goals", "away_goals"])
         frame = frame.sort_values("date", kind="mergesort").reset_index(drop=True)
 
+        # Every index below is keyed by team_key(name), never the raw name,
+        # so "Arsenal" and "Arsenal FC" land in the same bucket.
+        self._display: Dict[str, str] = {}
+
         # team -> parallel lists of (date, goals_for, goals_against, points)
         self._team_dates: Dict[str, List[int]] = {}
         self._team_rows: Dict[str, List[Tuple[float, float, int]]] = {}
@@ -172,7 +283,11 @@ class MatchHistory:
 
         for row in frame.itertuples(index=False):
             stamp = _as_nanos(row.date)
-            home, away = row.home_team, row.away_team
+            home, away = team_key(row.home_team), team_key(row.away_team)
+            if not home or not away:
+                continue
+            self._display.setdefault(home, str(row.home_team))
+            self._display.setdefault(away, str(row.away_team))
             hg, ag = float(row.home_goals), float(row.away_goals)
             result = result_from_goals(hg, ag)
             if result is None:
@@ -209,6 +324,7 @@ class MatchHistory:
 
     def team_form(self, team: str, before, n: int = FORM_WINDOW) -> Optional[dict]:
         """Overall form over the last `n` matches, home or away."""
+        team = team_key(team)
         rows = self._window(
             self._team_dates.get(team, ()), self._team_rows.get(team, ()), _as_nanos(before), n
         )
@@ -232,6 +348,7 @@ class MatchHistory:
 
     def home_form(self, team: str, before, n: int = FORM_WINDOW) -> Optional[dict]:
         """Form in the last `n` matches played at home."""
+        team = team_key(team)
         rows = self._window(
             self._home_dates.get(team, ()), self._home_rows.get(team, ()), _as_nanos(before), n
         )
@@ -246,6 +363,7 @@ class MatchHistory:
 
     def away_form(self, team: str, before, n: int = FORM_WINDOW) -> Optional[dict]:
         """Form in the last `n` matches played away from home."""
+        team = team_key(team)
         rows = self._window(
             self._away_dates.get(team, ()), self._away_rows.get(team, ()), _as_nanos(before), n
         )
@@ -267,6 +385,7 @@ class MatchHistory:
         other team's ground, so the feature always means "the team hosting
         today has historically beaten this opponent".
         """
+        home_team, away_team = team_key(home_team), team_key(away_team)
         pair = (home_team, away_team) if home_team <= away_team else (away_team, home_team)
         rows = self._window(
             self._pair_dates.get(pair, ()), self._pair_rows.get(pair, ()), _as_nanos(before), n
@@ -289,10 +408,15 @@ class MatchHistory:
         }
 
     def has_team(self, team: str) -> bool:
-        return team in self._team_dates
+        return team_key(team) in self._team_dates
 
     def teams(self) -> List[str]:
-        return sorted(self._team_dates)
+        """Display names, as they were spelled in the source data."""
+        return sorted(self._display[k] for k in self._team_dates if k in self._display)
+
+    def display_name(self, team: str) -> str:
+        """The stored spelling for a team, or the input if it is unknown."""
+        return self._display.get(team_key(team), team)
 
 
 # ============================================================

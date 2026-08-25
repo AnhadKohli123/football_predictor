@@ -28,8 +28,10 @@ from features import (  # noqa: E402
     MatchHistory,
     build_features_for_match,
     result_from_goals,
+    team_key,
     to_model_frame,
 )
+from fetch_club_data import extract_score  # noqa: E402
 from football_predictor import Cache, FootballPredictor, resolve_api_key  # noqa: E402
 from providers import (  # noqa: E402
     ApiFootballProvider,
@@ -201,6 +203,93 @@ class TestFeatureVector(unittest.TestCase):
         pl = build_features_for_match(self.history, "Alpha", "Beta", "2024-03-01", "Premier League")
         self.assertEqual(wc["is_neutral"], 1)
         self.assertEqual(pl["is_neutral"], 0)
+
+
+class TestTeamNameMatching(unittest.TestCase):
+    """
+    Sources spell clubs differently. If these stopped matching, every fixture
+    would look like an unknown team and quietly fall back to priors — the
+    predictions would still render, just meaninglessly.
+    """
+
+    def assertSameTeam(self, a, b):
+        self.assertEqual(team_key(a), team_key(b), f"{a!r} should match {b!r}")
+
+    def test_club_suffixes_are_ignored(self):
+        self.assertSameTeam("Arsenal FC", "Arsenal")
+        self.assertSameTeam("Chelsea FC", "Chelsea")
+        self.assertSameTeam("AFC Bournemouth", "Bournemouth")
+
+    def test_accents_are_stripped(self):
+        self.assertSameTeam("Bayern München", "Bayern Munchen")
+        self.assertSameTeam("Atlético Madrid", "Atletico Madrid")
+        self.assertSameTeam("1. FC Köln", "1 FC Koln")
+
+    def test_punctuation_is_ignored(self):
+        self.assertSameTeam("Paris Saint-Germain", "Paris Saint Germain")
+        self.assertSameTeam("Brighton & Hove Albion", "Brighton and Hove Albion")
+
+    def test_common_short_names(self):
+        self.assertSameTeam("Manchester City FC", "Man City")
+        self.assertSameTeam("Tottenham Hotspur", "Spurs")
+        self.assertSameTeam("Wolverhampton Wanderers", "Wolves")
+
+    def test_case_and_whitespace(self):
+        self.assertSameTeam("  real madrid  ", "Real Madrid")
+
+    def test_distinct_clubs_stay_distinct(self):
+        """The normaliser must not over-merge."""
+        for a, b in [
+            ("Manchester City", "Manchester United"),
+            ("Real Madrid", "Real Sociedad"),
+            ("Milan", "Internazionale"),
+            ("Arsenal", "Aston Villa"),
+        ]:
+            self.assertNotEqual(team_key(a), team_key(b), f"{a!r} must not match {b!r}")
+
+    def test_never_normalises_to_empty(self):
+        for name in ["FC", "AC", "SC Freiburg", "AS Roma"]:
+            self.assertTrue(team_key(name), f"{name!r} normalised to nothing")
+
+    def test_empty_input(self):
+        self.assertEqual(team_key(""), "")
+        self.assertEqual(team_key(None), "")
+
+    def test_history_lookup_uses_normalised_names(self):
+        frame = sample_matches().replace({"Alpha": "Alpha FC"})
+        history = MatchHistory(frame)
+        self.assertTrue(history.has_team("Alpha"))
+        self.assertTrue(history.has_team("alpha fc"))
+        self.assertEqual(history.display_name("Alpha"), "Alpha FC")
+        # And the form lookup must find the same matches either way.
+        self.assertEqual(
+            history.team_form("Alpha", "2024-02-08"),
+            history.team_form("Alpha FC", "2024-02-08"),
+        )
+
+
+class TestClubScoreParsing(unittest.TestCase):
+    """openfootball has used several score encodings over the years."""
+
+    def test_current_shape(self):
+        self.assertEqual(extract_score({"score": {"ft": [2, 1]}}), (2, 1))
+
+    def test_keyed_full_time(self):
+        self.assertEqual(extract_score({"score": {"ft": {"1": 3, "2": 0}}}), (3, 0))
+
+    def test_bare_pair(self):
+        self.assertEqual(extract_score({"score": [1, 1]}), (1, 1))
+
+    def test_legacy_fields(self):
+        self.assertEqual(extract_score({"score1": 4, "score2": 2}), (4, 2))
+
+    def test_unplayed_match_is_not_a_nil_nil(self):
+        """The dangerous failure: a missing score becoming a 0-0 result."""
+        self.assertIsNone(extract_score({}))
+        self.assertIsNone(extract_score({"score": None}))
+        self.assertIsNone(extract_score({"score": {"ht": [1, 0]}}))
+        self.assertIsNone(extract_score({"score": {"ft": [None, 1]}}))
+        self.assertIsNone(extract_score({"score": {"ft": ["", ""]}}))
 
 
 class TestProviderDetection(unittest.TestCase):

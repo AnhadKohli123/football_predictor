@@ -1,8 +1,7 @@
 # ⚽ Football Match Predictor
 
-Predicts Home Win / Draw / Away Win for upcoming matches in Europe's top
-leagues and the Champions League, using a gradient-boosted model trained on
-historical results.
+Predicts Home Win / Draw / Away Win for club matches in Europe's top leagues,
+using a gradient-boosted model trained on 44,000+ historical results.
 
 Runs **on demand**. There is no scheduler and no background job — you run it,
 it fetches only the fixtures in the window you asked for, and reuses anything
@@ -38,14 +37,41 @@ cd football_predictor
 pip install -r requirements.txt
 ```
 
-Add your token to a `.env` file (gitignored):
+Build a model — this needs **no API token at all**:
+
+```bash
+python fetch_club_data.py --all-leagues --seasons 14   # 44k club matches
+python build_features.py
+python train_model.py
+```
+
+Then predict, either in the browser or the terminal:
+
+```bash
+python app.py            # http://127.0.0.1:5000
+python predict.py --match "Arsenal" "Chelsea"
+```
+
+A token is only needed for *upcoming* fixtures. Put it in a `.env` file
+(gitignored):
 
 ```
 FOOTBALL_API_KEY=your_token_here
 ```
 
-Then follow **[QUICKSTART.md](QUICKSTART.md)** — seven steps to your first
-prediction. **[SETUP.md](SETUP.md)** explains the architecture.
+**[QUICKSTART.md](QUICKSTART.md)** walks through it step by step;
+**[SETUP.md](SETUP.md)** explains the architecture.
+
+## Web interface
+
+```bash
+python app.py
+```
+
+A local dashboard at `http://127.0.0.1:5000` with three tabs: a match
+predictor with searchable team pickers, an upcoming-fixtures view, and the
+model's own performance figures. Team names are matched loosely, so "Arsenal",
+"Arsenal FC" and "arsenal" all resolve to the same club.
 
 ## Usage
 
@@ -63,14 +89,21 @@ Leagues: `PL`, `LaLiga`, `SerieA`, `Bundesliga`, `Ligue1`, `Eredivisie`,
 
 ## How well does it work?
 
-On a chronological hold-out of 4,711 international matches:
+On a chronological hold-out of 8,874 club matches (everything after
+2023-11-27, never seen during training):
 
 | Metric | Model | Baseline |
 |---|---|---|
-| Accuracy | **56.1%** | 47.8% (always predict home win) |
-| Log loss | **0.939** | 1.052 (training-set class priors) |
+| Accuracy | **49.0%** | 43.3% (always predict home win) |
+| Log loss | **1.026** | 1.075 (training-set class priors) |
 
-Two things worth understanding before you trust a number like that:
+It beats both baselines, which is the bar that matters — but note the margin
+is modest, and smaller than the same model achieves on international football
+(56.1%). That is not a worse model; club leagues are simply harder. A league
+table is built to be competitive, whereas a World Cup group stage regularly
+throws up genuine mismatches that are easy to call.
+
+Three things worth understanding before you trust a number like that:
 
 **The split is chronological, not random.** The model trains on older matches
 and is tested on more recent ones. A random split would let it train on 2025
@@ -84,22 +117,31 @@ a property of the problem — draws rarely have the strongest signal, so a
 probabilistic model almost never ranks one first. If you care about draws,
 read the `DRAW%` column rather than the headline prediction.
 
-Roughly 50–56% is the honest range for football result prediction from form
-data alone. Treat the output as odds, not answers.
+**Team names are matched loosely.** Sources spell clubs differently —
+openfootball says "Arsenal FC", API-Football says "Arsenal". Names are matched
+on a normalised key so these resolve to the same club. Without that, every
+fixture would look like an unfamiliar team and quietly fall back to priors:
+the predictions would still render, they would just be meaningless.
+
+Roughly 48–53% is the honest range for club football from form data alone.
+Treat the output as odds, not answers.
 
 ## Project layout
 
 ```
 football_predictor/
+├── app.py                  # web frontend (Flask)
 ├── predict.py              # CLI entry point
 ├── football_predictor.py   # engine: caching, fixtures, prediction
 ├── providers.py            # API adapters (API-Football, football-data.org)
-├── features.py             # feature definitions — shared by train and predict
-├── data_fetcher.py         # step 1: download historical results
+├── features.py             # feature definitions + team-name matching
+├── fetch_club_data.py      # step 1: club results, no token needed
+├── data_fetcher.py         # step 1 (alt): results via your API token
 ├── build_features.py       # step 2: results → features
 ├── train_model.py          # step 3: train and evaluate
-├── merge_wc.py             # fold international results into the dataset
-├── tests/test_pipeline.py  # 39 tests, no network required
+├── merge_wc.py             # fold international results in as well
+├── templates/, static/     # frontend
+├── tests/test_pipeline.py  # 53 tests, no network required
 ├── requirements.txt
 ├── .env                    # your API token (gitignored)
 ├── data/                   # datasets (generated files are gitignored)
@@ -117,8 +159,9 @@ wrong in a way that is very hard to notice.
 python -m unittest discover -s tests -v
 ```
 
-39 tests covering feature correctness, both API adapters, caching, and an
-end-to-end train-and-predict cycle. None of them touch the network.
+53 tests covering feature correctness, team-name matching, score parsing,
+both API adapters, caching, and an end-to-end train-and-predict cycle. None of
+them touch the network.
 
 ## Security note
 
@@ -130,9 +173,11 @@ tokens in a public repository's history are scraped within minutes.
 
 - Form-based features only: no injuries, suspensions, lineups, xG or odds
 - No model of fixture congestion, travel distance or motivation
-- Cup competitions with two-legged ties are treated as independent matches
-- Team names must match between the API and your history file; a rename or a
-  different spelling means the team looks brand new and falls back to priors
+- Draws are rarely the top prediction — read the `DRAW%` column for those
+- Newly promoted clubs have thin history; fetch second tiers with
+  `--all-leagues` so they arrive with a real record instead of priors
+- Name matching handles common variants, but an unusual spelling can still
+  miss; the CLI and the web UI both flag teams with no history
 
 ## License
 
