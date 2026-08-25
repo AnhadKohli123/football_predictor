@@ -1,279 +1,208 @@
 """
-⚽ Predict — Use your trained AI to predict upcoming matches
-============================================================
-INSTRUCTIONS:
-1. Make sure train_model.py has been run (models/predictor.pkl exists)
-2. Run:  python predict.py
-3. It fetches UPCOMING matches and predicts Win/Draw/Loss
+⚽ Predict upcoming football matches.
+=====================================
 
-You can also predict a custom match at the bottom of this file.
+On-demand: nothing runs in the background. You call it, it fetches only the
+fixtures in the window you asked for, reuses anything still fresh in the
+cache, and prints predictions.
+
+    python predict.py                          # next 14 days, all leagues
+    python predict.py --days 7 --league PL     # one week of Premier League
+    python predict.py --match "Arsenal" "Chelsea"   # a single fixture, offline
+    python predict.py --force                  # ignore the cache, refetch
+
+Set your API token first (free from https://www.football-data.org/client/register):
+
+    export FOOTBALL_API_KEY='your_token_here'
 """
 
-import requests
-import pandas as pd
-import numpy as np
-import joblib
-import os
-from datetime import datetime, timedelta
+from __future__ import annotations
 
-# ============================================================
-# Config
-# ============================================================
+import argparse
+import logging
+import sys
 
-API_TOKEN  = "YOUR_TOKEN_HERE"   # 👈 paste your token
-HEADERS    = {"X-Auth-Token": API_TOKEN}
-BASE_URL   = "https://api.football-data.org/v4"
+from football_predictor import (
+    DEFAULT_DB,
+    DEFAULT_ENCODER,
+    DEFAULT_HISTORY,
+    DEFAULT_MODEL,
+    LEAGUES,
+    FootballPredictor,
+    MissingAPIKey,
+    ModelNotTrained,
+    Prediction,
+)
 
-MODEL_FILE   = "models/predictor.pkl"
-ENCODER_FILE = "models/label_encoder.pkl"
-MATCHES_FILE = "data/all_matches.csv"
+CONFIDENCE_ICON = {"High": "🔥", "Medium": "✅", "Low": "⚠️ "}
 
-LEAGUES = {
-    "Premier League":   2021,
-    "La Liga":          2014,
-    "Bundesliga":       2002,
-    "Serie A":          2019,
-    "Ligue 1":          2015,
-    "Eredivisie":       2003,
-    "Primeira Liga":    2017,
-    "Champions League": 2001,
-}
 
-LEAGUE_MAP = {
-    "Premier League": 0, "La Liga": 1, "Bundesliga": 2,
-    "Serie A": 3, "Ligue 1": 4, "Eredivisie": 5,
-    "Primeira Liga": 6, "Champions League": 7, "World Cup": 8,
-}
-
-FEATURE_COLS = [
-    "home_form_points", "home_form_goals_scored", "home_form_goals_conceded",
-    "home_form_goal_diff", "home_form_wins", "home_form_draws", "home_form_losses",
-    "away_form_points", "away_form_goals_scored", "away_form_goals_conceded",
-    "away_form_goal_diff", "away_form_wins", "away_form_draws", "away_form_losses",
-    "home_venue_win_rate", "home_venue_goals_scored", "home_venue_goals_conceded",
-    "away_travel_win_rate", "away_travel_goals_scored", "away_travel_goals_conceded",
-    "h2h_home_wins", "h2h_away_wins", "h2h_draws",
-    "diff_form_points", "diff_form_goal_diff", "diff_attack", "diff_defence",
-    "league_code", "is_neutral",
-]
-
-# ============================================================
-# Load model and historical data
-# ============================================================
-
-print("\n⚽ Loading your prediction AI...\n")
-
-if not os.path.exists(MODEL_FILE):
-    print("❌ No trained model found. Run train_model.py first!")
-    exit()
-
-model   = joblib.load(MODEL_FILE)
-encoder = joblib.load(ENCODER_FILE)
-history = pd.read_csv(MATCHES_FILE, parse_dates=["date"])
-history = history.sort_values("date").reset_index(drop=True)
-
-print(f"✅ Model loaded")
-print(f"✅ History: {len(history)} matches ({history['date'].min().date()} → {history['date'].max().date()})")
-
-# ============================================================
-# Feature builder (same logic as build_features.py)
-# ============================================================
-
-def get_team_stats(df, team, before_date, n=5):
-    mask = (
-        ((df["home_team"] == team) | (df["away_team"] == team)) &
-        (df["date"] < pd.Timestamp(before_date))
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="predict.py",
+        description="Predict upcoming football matches with your trained model.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Leagues: " + ", ".join(LEAGUES),
     )
-    recent = df[mask].tail(n)
-    if len(recent) == 0:
-        return None
-    points, scored, conceded, goal_diff = 0, 0, 0, 0
-    wins, draws, losses = 0, 0, 0
-    for _, row in recent.iterrows():
-        is_home   = row["home_team"] == team
-        g_for     = row["home_goals"] if is_home else row["away_goals"]
-        g_against = row["away_goals"] if is_home else row["home_goals"]
-        scored += g_for; conceded += g_against
-        goal_diff += (g_for - g_against)
-        if (row["result"] == "HOME_WIN" and is_home) or \
-           (row["result"] == "AWAY_WIN" and not is_home):
-            points += 3; wins += 1
-        elif row["result"] == "DRAW":
-            points += 1; draws += 1
-        else:
-            losses += 1
-    n_p = len(recent)
-    return {
-        "form_points": points/n_p, "form_goals_scored": scored/n_p,
-        "form_goals_conceded": conceded/n_p, "form_goal_diff": goal_diff/n_p,
-        "form_wins": wins/n_p, "form_draws": draws/n_p, "form_losses": losses/n_p,
-    }
+    parser.add_argument("--days", type=int, default=14,
+                        help="how many days ahead to look (default: 14)")
+    parser.add_argument("--league", action="append", dest="leagues", metavar="NAME",
+                        choices=list(LEAGUES),
+                        help="restrict to a league; repeat for several (default: all)")
+    parser.add_argument("--match", nargs=2, metavar=("HOME", "AWAY"),
+                        help="predict one fixture instead of fetching (works offline)")
+    parser.add_argument("--match-league", default="", metavar="NAME",
+                        help="competition for --match, e.g. 'Premier League'")
+    parser.add_argument("--force", action="store_true",
+                        help="ignore cached responses and refetch from the API")
+    parser.add_argument("--min-confidence", choices=["Low", "Medium", "High"], default="Low",
+                        help="only show predictions at or above this confidence")
+    parser.add_argument("--model", default=DEFAULT_MODEL, help=f"model file (default: {DEFAULT_MODEL})")
+    parser.add_argument("--encoder", default=DEFAULT_ENCODER, help=argparse.SUPPRESS)
+    parser.add_argument("--history", default=DEFAULT_HISTORY,
+                        help=f"historical matches CSV (default: {DEFAULT_HISTORY})")
+    parser.add_argument("--db", default=DEFAULT_DB, help=f"cache database (default: {DEFAULT_DB})")
+    parser.add_argument("--api-key", default=None,
+                        help="API token (otherwise read from FOOTBALL_API_KEY or .env)")
+    parser.add_argument("--provider", choices=["api-football", "football-data"], default=None,
+                        help="override provider auto-detection")
+    parser.add_argument("--csv", default="predictions.csv", help="CSV output path")
+    parser.add_argument("--json", default="predictions.json", help="JSON output path")
+    parser.add_argument("--no-export", action="store_true", help="print only, write no files")
+    parser.add_argument("-v", "--verbose", action="store_true", help="show debug logging")
+    return parser
 
-def get_home_stats(df, team, before_date, n=5):
-    mask = (df["home_team"] == team) & (df["date"] < pd.Timestamp(before_date))
-    recent = df[mask].tail(n)
-    if len(recent) == 0:
-        return None
-    n_p = len(recent)
-    return {
-        "home_win_rate":       (recent["result"] == "HOME_WIN").sum() / n_p,
-        "home_goals_scored":   recent["home_goals"].sum() / n_p,
-        "home_goals_conceded": recent["away_goals"].sum() / n_p,
-    }
 
-def get_away_stats(df, team, before_date, n=5):
-    mask = (df["away_team"] == team) & (df["date"] < pd.Timestamp(before_date))
-    recent = df[mask].tail(n)
-    if len(recent) == 0:
-        return None
-    n_p = len(recent)
-    return {
-        "away_win_rate":       (recent["result"] == "AWAY_WIN").sum() / n_p,
-        "away_goals_scored":   recent["away_goals"].sum() / n_p,
-        "away_goals_conceded": recent["home_goals"].sum() / n_p,
-    }
-
-def get_h2h(df, home_team, away_team, before_date, n=5):
-    mask = (
-        (
-            ((df["home_team"] == home_team) & (df["away_team"] == away_team)) |
-            ((df["home_team"] == away_team) & (df["away_team"] == home_team))
-        ) &
-        (df["date"] < pd.Timestamp(before_date))
+def print_table(predictions: list[Prediction]) -> None:
+    home_w = max([len(p.home_team) for p in predictions] + [12])
+    away_w = max([len(p.away_team) for p in predictions] + [12])
+    header = (
+        f"{'DATE':<11} {'HOME':<{home_w}} {'AWAY':<{away_w}} "
+        f"{'PREDICTION':<10} {'HOME%':>6} {'DRAW%':>6} {'AWAY%':>6}  CONF"
     )
-    recent = df[mask].tail(n)
-    if len(recent) == 0:
-        return None
-    hw, aw, dr = 0, 0, 0
-    for _, row in recent.iterrows():
-        if row["home_team"] == home_team:
-            if row["result"] == "HOME_WIN": hw += 1
-            elif row["result"] == "AWAY_WIN": aw += 1
-            else: dr += 1
-        else:
-            if row["result"] == "HOME_WIN": aw += 1
-            elif row["result"] == "AWAY_WIN": hw += 1
-            else: dr += 1
-    n_p = len(recent)
-    return {"h2h_home_wins": hw/n_p, "h2h_away_wins": aw/n_p, "h2h_draws": dr/n_p}
+    print(header)
+    print("─" * len(header))
 
-def build_features_for_match(home_team, away_team, date, league, history):
-    """Build the full feature vector for one match."""
-    nf = {"form_points":1.0,"form_goals_scored":1.2,"form_goals_conceded":1.2,
-          "form_goal_diff":0.0,"form_wins":0.33,"form_draws":0.33,"form_losses":0.33}
-    nh = {"home_win_rate":0.45,"home_goals_scored":1.3,"home_goals_conceded":1.1}
-    na = {"away_win_rate":0.30,"away_goals_scored":1.1,"away_goals_conceded":1.3}
-    n2 = {"h2h_home_wins":0.33,"h2h_away_wins":0.33,"h2h_draws":0.33}
-
-    hf = get_team_stats(history, home_team, date) or nf
-    af = get_team_stats(history, away_team, date) or nf
-    hh = get_home_stats(history, home_team, date) or nh
-    ha = get_away_stats(history, away_team, date) or na
-    h2 = get_h2h(history, home_team, away_team, date) or n2
-
-    return {
-        "home_form_points":          hf["form_points"],
-        "home_form_goals_scored":    hf["form_goals_scored"],
-        "home_form_goals_conceded":  hf["form_goals_conceded"],
-        "home_form_goal_diff":       hf["form_goal_diff"],
-        "home_form_wins":            hf["form_wins"],
-        "home_form_draws":           hf["form_draws"],
-        "home_form_losses":          hf["form_losses"],
-        "away_form_points":          af["form_points"],
-        "away_form_goals_scored":    af["form_goals_scored"],
-        "away_form_goals_conceded":  af["form_goals_conceded"],
-        "away_form_goal_diff":       af["form_goal_diff"],
-        "away_form_wins":            af["form_wins"],
-        "away_form_draws":           af["form_draws"],
-        "away_form_losses":          af["form_losses"],
-        "home_venue_win_rate":       hh["home_win_rate"],
-        "home_venue_goals_scored":   hh["home_goals_scored"],
-        "home_venue_goals_conceded": hh["home_goals_conceded"],
-        "away_travel_win_rate":      ha["away_win_rate"],
-        "away_travel_goals_scored":  ha["away_goals_scored"],
-        "away_travel_goals_conceded":ha["away_goals_conceded"],
-        "h2h_home_wins":             h2["h2h_home_wins"],
-        "h2h_away_wins":             h2["h2h_away_wins"],
-        "h2h_draws":                 h2["h2h_draws"],
-        "diff_form_points":          hf["form_points"]       - af["form_points"],
-        "diff_form_goal_diff":       hf["form_goal_diff"]    - af["form_goal_diff"],
-        "diff_attack":               hf["form_goals_scored"] - af["form_goals_conceded"],
-        "diff_defence":              af["form_goals_scored"] - hf["form_goals_conceded"],
-        "league_code":               LEAGUE_MAP.get(league, -1),
-        "is_neutral":                1 if league == "World Cup" else 0,
-    }
-
-def predict_match(home_team, away_team, date, league, history):
-    """Predict outcome for a single match."""
-    feats = build_features_for_match(home_team, away_team, date, league, history)
-    X = pd.DataFrame([feats])[FEATURE_COLS]
-    probs  = model.predict_proba(X)[0]
-    labels = encoder.classes_
-    prob_dict = dict(zip(labels, probs))
-    prediction = max(prob_dict, key=prob_dict.get)
-    return prediction, prob_dict
-
-def confidence_label(prob):
-    if prob >= 0.60: return "🔥 High"
-    if prob >= 0.45: return "✅ Medium"
-    return "⚠️  Low"
-
-# ============================================================
-# Fetch upcoming fixtures from API
-# ============================================================
-
-print("\n📅 Fetching upcoming fixtures...\n")
-
-upcoming = []
-today = datetime.today()
-in_10_days = today + timedelta(days=10)
-
-for league_name, comp_id in LEAGUES.items():
-    url = f"{BASE_URL}/competitions/{comp_id}/matches"
-    params = {
-        "status": "SCHEDULED",
-        "dateFrom": today.strftime("%Y-%m-%d"),
-        "dateTo":   in_10_days.strftime("%Y-%m-%d"),
-    }
-    r = requests.get(url, headers=HEADERS, params=params)
-    if r.status_code == 200:
-        matches = r.json().get("matches", [])
-        for m in matches:
-            upcoming.append({
-                "league":     league_name,
-                "date":       m["utcDate"][:10],
-                "home_team":  m["homeTeam"]["name"],
-                "away_team":  m["awayTeam"]["name"],
-            })
-
-# ============================================================
-# Print predictions for upcoming fixtures
-# ============================================================
-
-if upcoming:
-    print(f"{'DATE':<12} {'HOME':<30} {'AWAY':<30} {'PRED':<12} {'HOME%':>6} {'DRAW%':>6} {'AWAY%':>6} {'CONF'}")
-    print("─" * 115)
-
-    for m in upcoming:
-        pred, probs = predict_match(
-            m["home_team"], m["away_team"],
-            m["date"], m["league"], history
+    current_league = None
+    for p in predictions:
+        if p.league and p.league != current_league:
+            current_league = p.league
+            print(f"\n  ── {current_league} ──")
+        icon = CONFIDENCE_ICON.get(p.confidence, "")
+        print(
+            f"{p.date:<11} {p.home_team:<{home_w}} {p.away_team:<{away_w}} "
+            f"{p.prediction:<10} {p.prob_home_win:>5.1%} {p.prob_draw:>5.1%} "
+            f"{p.prob_away_win:>5.1%}  {icon} {p.confidence}"
         )
-        hw = probs.get("HOME_WIN", 0)
-        dr = probs.get("DRAW", 0)
-        aw = probs.get("AWAY_WIN", 0)
-        top_prob = max(hw, dr, aw)
-        conf = confidence_label(top_prob)
-
-        pred_short = {"HOME_WIN": "Home Win", "DRAW": "Draw", "AWAY_WIN": "Away Win"}.get(pred, pred)
-
-        print(f"{m['date']:<12} {m['home_team']:<30} {m['away_team']:<30} "
-              f"{pred_short:<12} {hw:>5.1%} {dr:>5.1%} {aw:>5.1%}  {conf}")
-
-    print(f"\n📊 {len(upcoming)} matches predicted")
-    print("   Confidence: 🔥 High = strong signal | ✅ Medium = reasonable | ⚠️ Low = uncertain")
-else:
-    print("ℹ️  No upcoming matches found in the next 7 days (may be off-season)")
 
 
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
 
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(levelname)s: %(message)s" if args.verbose else "%(message)s",
+    )
+    log = logging.getLogger("predict")
+
+    try:
+        with FootballPredictor(
+            model_path=args.model,
+            encoder_path=args.encoder,
+            history_path=args.history,
+            db_path=args.db,
+            api_key=args.api_key,
+            provider=args.provider,
+            force=args.force,
+        ) as predictor:
+
+            if args.match:
+                home, away = args.match
+                prediction = predictor.predict_match(
+                    home, away, league=args.match_league
+                )
+                predictions = [prediction]
+            else:
+                print(f"\n📅 Looking for fixtures in the next {args.days} days...\n")
+                fixtures = predictor.fetch_upcoming_fixtures(
+                    days=args.days, leagues=args.leagues
+                )
+                if not fixtures:
+                    if predictor.client.failures:
+                        # An empty result and a failed request look identical
+                        # from here unless we say which one happened.
+                        print(
+                            f"❌ {predictor.client.failures} request(s) to "
+                            f"'{predictor.provider_name}' failed — no fixtures retrieved.\n"
+                            "   Check the messages above. Common causes:\n"
+                            "     • wrong provider for your key "
+                            "(try --provider football-data or --provider api-football)\n"
+                            "     • token expired, or the daily quota is used up\n"
+                            "     • no internet access from this machine\n"
+                            "   Re-run with -v to see the full request details.",
+                            file=sys.stderr,
+                        )
+                        return 5
+                    print(
+                        "ℹ️  No scheduled fixtures found in that window.\n"
+                        "   This is normal mid-summer, or between competition rounds.\n"
+                        "   Try a longer window:  python predict.py --days 30"
+                    )
+                    return 0
+                print(f"✅ Found {len(fixtures)} fixtures — predicting...\n")
+
+                unknown = predictor.unknown_teams(fixtures)
+                if unknown:
+                    # Predictions for these rest entirely on neutral priors,
+                    # so they carry far less information than they look like.
+                    preview = ", ".join(unknown[:6])
+                    more = f" (+{len(unknown) - 6} more)" if len(unknown) > 6 else ""
+                    print(f"⚠️  No history for: {preview}{more}")
+                    print("   Their predictions fall back to league-average priors.")
+                    print("   Fetch more history with data_fetcher.py to fix this.\n")
+
+                predictions = predictor.predict_fixtures(fixtures)
+
+            ranking = {"Low": 0, "Medium": 1, "High": 2}
+            floor = ranking[args.min_confidence]
+            shown = [p for p in predictions if ranking[p.confidence] >= floor]
+
+            if not shown:
+                print(f"ℹ️  No predictions at '{args.min_confidence}' confidence or above.")
+                return 0
+
+            print_table(shown)
+
+            hidden = len(predictions) - len(shown)
+            print(f"\n📊 {len(shown)} prediction(s)" + (f", {hidden} below the confidence floor" if hidden else ""))
+            if predictor.client.requests_made:
+                print(f"🌐 {predictor.client.requests_made} API request(s) made this run")
+            else:
+                print("💾 Served entirely from cache — no API requests made")
+
+            if not args.no_export:
+                predictor.export(predictions, csv_path=args.csv, json_path=args.json)
+                print(f"💾 Saved to {args.csv} and {args.json}")
+
+            print(
+                "\n   🔥 High = strong signal   ✅ Medium = reasonable   ⚠️  Low = uncertain\n"
+                "   Football is genuinely hard to predict — treat these as odds, not answers."
+            )
+        return 0
+
+    except MissingAPIKey as exc:
+        print(f"\n🔑 {exc}\n", file=sys.stderr)
+        return 2
+    except ModelNotTrained as exc:
+        print(f"\n❌ {exc}\n", file=sys.stderr)
+        return 3
+    except FileNotFoundError as exc:
+        print(f"\n❌ {exc}\n", file=sys.stderr)
+        return 4
+    except KeyboardInterrupt:
+        print("\nInterrupted.", file=sys.stderr)
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())
